@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Configuration (contient des mots de passe)
+config.py
+
+# Dossiers de factures
+factures/
+factures-owork/
+
+# Fichiers divers
+*.har
+*.log
+.env

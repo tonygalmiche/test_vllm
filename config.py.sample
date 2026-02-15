@@ -1,0 +1,63 @@
+"""Configuration centrale du script d'extraction de factures."""
+
+from pathlib import Path
+
+# Dossier contenant les factures PDF à analyser.
+FACTURES_DIR = Path(__file__).parent / "factures"
+
+# Dossier contenant les factures fournisseurs PDF à analyser.
+FACTURES_FOURNISSEUR_DIR = Path(__file__).parent / "factures-owork"
+
+# URL de l'endpoint compatible OpenAI exposé par le serveur vLLM.
+BASE_URL = "http://192.168.0.1:8000/v1"
+
+# Nom du modèle servi par vLLM.
+MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+
+# Clé API si une authentification est nécessaire (None sinon).
+API_KEY = None
+
+# Température d'échantillonnage transmise au modèle.
+TEMPERATURE = 0.0
+
+# Activer l'affichage des informations de debug.
+DEBUG = True
+
+# Seuil minimum de caractères extraits du PDF pour considérer que le texte est exploitable.
+# En dessous, le script bascule automatiquement en mode vision (envoi des pages comme images).
+MIN_TEXT_LENGTH = 100
+
+# Liste indicative de clients attendus (facultative mais utile pour guider l'IA).
+CLIENT_HINTS = [
+    "Plastigray",
+]
+
+# Liste indicative de fournisseurs attendus (facultative mais utile pour guider l'IA).
+FOURNISSEUR_HINTS: list[str] = []
+
+# Noms à exclure du champ fournisseur (ce sont les destinataires, pas les fournisseurs).
+FOURNISSEUR_EXCLUDE = [
+    "Plastigray",
+]
+
+
+# Paramètres de connexion à la base Odoo cible.
+# Adaptés pour les appels XML-RPC depuis get_facture_owork.py.
+ODOO_URL = "https://odoo1"
+ODOO_DB = "odoo1"
+ODOO_USERNAME = "admin"
+ODOO_PASSWORD = "CHANGEZ_MOI"
+ODOO_VERIFY_SSL = False
+
+
+# Paramètres de connexion O'Work (utilisés par login_owork_via_curl.py et get_facture_owork.py).
+OWORK_BASE_URL = "https://xxx-owork.fr"
+OWORK_USERNAME = "user@example.com"
+OWORK_PASSWORD = "CHANGEZ_MOI"
+OWORK_REALM = "normal"
+
+# Date de début des factures à télécharger depuis O'Work (format YYYY-MM-DD).
+OWORK_INVOICE_DATE_FROM = "2026-02-01"
+
+# Nombre maximum de factures à récupérer.
+OWORK_INVOICE_LIMIT = 100
