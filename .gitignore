@@ -26,3 +26,7 @@ TRI-PHOTOS/
 *.har
 *.log
 .env
+
+test.flac
+test.wav
+
