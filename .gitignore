@@ -20,6 +20,7 @@ config.py
 # Dossiers de factures
 factures/
 factures-owork/
+TRI-PHOTOS/
 
 # Fichiers divers
 *.har
