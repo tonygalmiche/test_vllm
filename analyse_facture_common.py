@@ -20,7 +20,12 @@ from config import (
     API_KEY,
     BASE_URL,
     DEBUG,
+    DEEPINFRA_API_KEY,
+    DEEPINFRA_MODEL,
     FACTURES_DIR,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
+    LLM_PROVIDER,
     MIN_TEXT_LENGTH,
     MODEL_NAME,
     ODOO_DB,
@@ -266,7 +271,7 @@ def pdf_to_base64_images(pdf_path: Path, dpi: int = 200, max_pages: int = 0) -> 
 # Communication avec le serveur vLLM
 # ---------------------------------------------------------------------------
 
-def call_vllm_with_messages(messages: List[Dict[str, str]], temperature: float) -> Dict[str, Any]:
+def _call_vllm_with_messages(messages: List[Dict[str, Any]], temperature: float) -> Dict[str, Any]:
     """Envoie des messages arbitraires à l'API HTTP vLLM."""
 
     endpoint = BASE_URL.rstrip("/") + "/chat/completions"
@@ -284,6 +289,212 @@ def call_vllm_with_messages(messages: List[Dict[str, str]], temperature: float) 
     response = requests.post(endpoint, headers=headers, json=payload, timeout=120)
     response.raise_for_status()
     return response.json()
+
+
+# ---------------------------------------------------------------------------
+# Communication avec Google Gemini
+# ---------------------------------------------------------------------------
+
+def _convert_messages_to_gemini(messages: List[Dict[str, Any]]) -> tuple[Optional[str], List[Dict[str, Any]]]:
+    """Convertit les messages au format OpenAI vers le format Gemini.
+
+    Retourne (system_instruction, contents) où contents est la liste des
+    messages utilisateur/assistant au format Gemini.
+    """
+    system_instruction: Optional[str] = None
+    contents: List[Dict[str, Any]] = []
+
+    for msg in messages:
+        role = msg["role"]
+        raw_content = msg["content"]
+
+        if role == "system":
+            # Gemini gère l'instruction système séparément
+            system_instruction = raw_content if isinstance(raw_content, str) else str(raw_content)
+            continue
+
+        gemini_role = "user" if role == "user" else "model"
+
+        # Contenu simple (texte)
+        if isinstance(raw_content, str):
+            contents.append({
+                "role": gemini_role,
+                "parts": [{"text": raw_content}],
+            })
+            continue
+
+        # Contenu multimodal (liste de blocs texte/image)
+        parts: List[Dict[str, Any]] = []
+        for block in raw_content:
+            if block.get("type") == "text":
+                parts.append({"text": block["text"]})
+            elif block.get("type") == "image_url":
+                url = block["image_url"]["url"]
+                # data:image/png;base64,<data>
+                if url.startswith("data:"):
+                    header, b64data = url.split(",", 1)
+                    mime = header.split(":")[1].split(";")[0]
+                    parts.append({
+                        "inline_data": {
+                            "mime_type": mime,
+                            "data": b64data,
+                        }
+                    })
+                else:
+                    # URL distante — on la passe telle quelle
+                    parts.append({"text": f"[image: {url}]"})
+
+        contents.append({"role": gemini_role, "parts": parts})
+
+    return system_instruction, contents
+
+
+def _call_gemini_with_messages(
+    messages: List[Dict[str, Any]],
+    temperature: float,
+    max_retries: int = 7,
+) -> Dict[str, Any]:
+    """Envoie des messages au format OpenAI vers l'API Google Gemini et
+    retourne la réponse au format OpenAI (compatibilité transparente).
+
+    Gère automatiquement les erreurs 429 (rate limit) avec un backoff
+    exponentiel (jusqu'à *max_retries* tentatives).
+    """
+
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+
+    system_instruction, contents = _convert_messages_to_gemini(messages)
+
+    payload: Dict[str, Any] = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": temperature,
+        },
+    }
+    if system_instruction:
+        payload["systemInstruction"] = {
+            "parts": [{"text": system_instruction}],
+        }
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        response = requests.post(endpoint, json=payload, timeout=120)
+
+        if response.status_code == 429:
+            wait = 3 ** attempt  # 1, 3, 9, 27, 81 s
+            print(
+                f"  Gemini 429 (rate limit) — nouvelle tentative dans {wait}s "
+                f"({attempt + 1}/{max_retries})…",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+            last_exc = requests.exceptions.HTTPError(response=response)
+            continue
+
+        response.raise_for_status()
+
+        gemini_data = response.json()
+
+        # Convertir la réponse Gemini vers le format OpenAI attendu par le reste du code
+        candidate = gemini_data.get("candidates", [{}])[0]
+        parts = candidate.get("content", {}).get("parts", [])
+        # Filtrer les parties "thought" (raisonnement interne de Gemini 2.5)
+        # pour ne garder que la réponse finale
+        text_parts = [p["text"] for p in parts if "text" in p and not p.get("thought")]
+        content_text = "\n".join(text_parts)
+
+        if DEBUG:
+            # Afficher si des pensées ont été filtrées
+            thought_parts = [p for p in parts if p.get("thought")]
+            if thought_parts:
+                print(f"  Gemini thinking filtré ({len(thought_parts)} partie(s))", file=sys.stderr)
+
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content_text,
+                    }
+                }
+            ],
+            "_gemini_raw": gemini_data,
+        }
+
+    # Toutes les tentatives épuisées
+    raise requests.exceptions.HTTPError(
+        f"Gemini: rate limit toujours actif après {max_retries} tentatives",
+        response=response,  # type: ignore[possibly-undefined]
+    ) from last_exc
+
+
+# ---------------------------------------------------------------------------
+# Communication avec DeepInfra (API compatible OpenAI)
+# ---------------------------------------------------------------------------
+
+def _call_deepinfra_with_messages(
+    messages: List[Dict[str, Any]],
+    temperature: float,
+    max_retries: int = 5,
+) -> Dict[str, Any]:
+    """Envoie des messages à l'API DeepInfra (compatible OpenAI) et retourne
+    la réponse au format OpenAI.
+
+    Gère automatiquement les erreurs 429 (rate limit) avec un backoff
+    exponentiel (jusqu'à *max_retries* tentatives).
+    """
+
+    endpoint = "https://api.deepinfra.com/v1/openai/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DEEPINFRA_API_KEY}",
+    }
+
+    payload = {
+        "model": DEEPINFRA_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+    }
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=120)
+
+        if response.status_code == 429:
+            wait = 3 ** attempt  # 1, 3, 9, 27, 81 s
+            print(
+                f"  DeepInfra 429 (rate limit) — nouvelle tentative dans {wait}s "
+                f"({attempt + 1}/{max_retries})…",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+            last_exc = requests.exceptions.HTTPError(response=response)
+            continue
+
+        response.raise_for_status()
+        return response.json()
+
+    # Toutes les tentatives épuisées
+    raise requests.exceptions.HTTPError(
+        f"DeepInfra: rate limit toujours actif après {max_retries} tentatives",
+        response=response,  # type: ignore[possibly-undefined]
+    ) from last_exc
+
+
+# ---------------------------------------------------------------------------
+# Interface unifiée (routage vLLM ↔ Gemini ↔ DeepInfra)
+# ---------------------------------------------------------------------------
+
+def call_vllm_with_messages(messages: List[Dict[str, Any]], temperature: float) -> Dict[str, Any]:
+    """Envoie des messages au LLM configuré (vLLM, Gemini ou DeepInfra)."""
+    if LLM_PROVIDER == "gemini":
+        return _call_gemini_with_messages(messages, temperature)
+    if LLM_PROVIDER == "deepinfra":
+        return _call_deepinfra_with_messages(messages, temperature)
+    return _call_vllm_with_messages(messages, temperature)
 
 
 def call_vllm(prompt: str, temperature: float = TEMPERATURE) -> Dict[str, Any]:
@@ -351,14 +562,15 @@ def _ask_entity_vision(
     prompt = (
         f"Regarde cette facture. Identifie le nom du {entity_label.lower()} "
         f"(celui qui ÉMET la facture, dont le nom/logo apparaît en haut).\n"
-        f"Identifie aussi son SIRET (14 chiffres) ou SIREN (9 chiffres) de l'ÉMETTEUR. "
-        f"Cherche en priorité une mention 'SIREN=' ou 'SIRET=' sur la facture. "
-        f"Ne retourne PAS le numéro de TVA intracommunautaire (commençant par FR). "
+        f"Identifie aussi son SIRET (14 chiffres), SIREN (9 chiffres) ou à défaut "
+        f"son numéro de TVA intracommunautaire (ex: FR65377846381) de l'ÉMETTEUR. "
+        f"Cherche en priorité une mention 'SIREN=' ou 'SIRET=' sur la facture, "
+        f"sinon le numéro de TVA (N° ID.TVA, VAT, TVA intracommunautaire). "
         f"ATTENTION : l'identifiant doit être celui de l'ÉMETTEUR, "
         f"pas celui du destinataire.\n"
         f"{exclude_text}\n\n"
         f"Réponds UNIQUEMENT en JSON : {{\"{entity_key}\": \"...\", \"{entity_id_key}\": \"...\"}}\n"
-        f"Si tu ne trouves pas le SIRET ou SIREN, laisse une chaîne vide."
+        f"Si tu ne trouves ni SIRET, ni SIREN, ni numéro de TVA, laisse une chaîne vide."
     )
 
     images_b64 = pdf_to_base64_images(pdf_path, max_pages=1)
@@ -366,7 +578,7 @@ def _ask_entity_vision(
     content = api_response["choices"][0]["message"]["content"].strip()
 
     if DEBUG:
-        print(f"  🖼 Vision entity response: {content[:300]}", file=sys.stderr)
+        print(f"  Vision entity response: {content[:300]}", file=sys.stderr)
 
     parsed = parse_llm_json(content)
     result: Dict[str, str] = {}
@@ -427,15 +639,17 @@ def is_emitter_name(text: str) -> bool:
 
 
 def normalize_identifier(value: str) -> str:
-    """Normalise un identifiant entreprise (SIRET 14, SIREN 9, TVA intra 11→SIREN)."""
-    digits = re.sub(r"\D", "", value or "")
+    """Normalise un identifiant entreprise (SIRET 14, SIREN 9, ou numéro de TVA intracommunautaire)."""
+    cleaned = (value or "").strip()
+    digits = re.sub(r"\D", "", cleaned)
     if len(digits) == 14:
         return digits
     if len(digits) == 9:
         return digits
-    # TVA intracommunautaire FR : 2 chiffres clé + SIREN 9 chiffres = 11
-    if len(digits) == 11:
-        return digits[2:]  # extraire le SIREN (9 derniers chiffres)
+    # Numéro de TVA intracommunautaire (ex: FR65377846381) : on le conserve tel quel
+    tva_match = re.match(r"^[A-Z]{2}\s*\d{2,13}$", cleaned.upper().replace(" ", ""))
+    if tva_match:
+        return cleaned.upper().replace(" ", "")
     return ""
 
 
@@ -498,7 +712,7 @@ def guess_entity_from_text(pdf_text: str, hints: List[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def display_field(value: Any) -> str:
-    """Retourne la valeur prête pour affichage (croix rouge si vide)."""
+    """Retourne la valeur prête pour affichage (croix si vide)."""
 
     text = str(value or "").strip()
     return text if text else "❌"
@@ -516,11 +730,50 @@ def visual_width(text: str) -> int:
     return width
 
 
-def pad_cell(value: str, target_width: int) -> str:
+def pad_cell(value: str, target_width: int, align_right: bool = False) -> str:
     """Complète une cellule avec des espaces pour atteindre la largeur souhaitée."""
 
     padding = max(target_width - visual_width(value), 0)
+    if align_right:
+        return (" " * padding) + value
     return value + (" " * padding)
+
+
+def normalize_date_display(value: str) -> str:
+    """Normalise une date vers le format JJ/MM/AAAA pour l'affichage."""
+    import re as _re
+    text = value.strip()
+    # DD.MM.YYYY ou DD-MM-YYYY
+    m = _re.match(r"^(\d{1,2})[.\-](\d{1,2})[.\-](\d{4})$", text)
+    if m:
+        return f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{m.group(3)}"
+    # YYYY-MM-DD ou YYYY/MM/DD
+    m = _re.match(r"^(\d{4})[\-/](\d{1,2})[\-/](\d{1,2})$", text)
+    if m:
+        return f"{int(m.group(3)):02d}/{int(m.group(2)):02d}/{m.group(1)}"
+    # DD/MM/YYYY déjà OK
+    m = _re.match(r"^(\d{1,2})/(\d{1,2})/(\d{4})$", text)
+    if m:
+        return f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{m.group(3)}"
+    # DD-Mon-YY (ex: 09-Feb-26)
+    months = {
+        "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+        "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+        "janv": "01", "févr": "02", "fév": "02", "mars": "03", "avr": "04", "mai": "05",
+        "juin": "06", "juil": "07", "aoû": "08", "aout": "08", "sept": "09",
+    }
+    m = _re.match(r"^(\d{1,2})[\-. ](\w+)[\-. ](\d{2,4})$", text)
+    if m:
+        day = int(m.group(1))
+        mon_str = m.group(2).lower().rstrip(".")
+        year_str = m.group(3)
+        mon = months.get(mon_str, "")
+        if mon:
+            year = int(year_str)
+            if year < 100:
+                year += 2000
+            return f"{day:02d}/{mon}/{year}"
+    return text
 
 
 def parse_decimal(value: Any) -> Decimal | None:
@@ -647,9 +900,9 @@ def render_summary_table(
 
         rows.append(
             [
-                entry.get("file", ""),
+                _extract_odoo_name_from_filename(entry.get("file", "")),
                 display_field(extraction.get("numero")),
-                display_field(extraction.get("date")),
+                normalize_date_display(display_field(extraction.get("date"))),
                 display_field(extraction.get(entity_key)),
                 display_field(extraction.get(entity_id_key)),
                 display_field(extraction.get("montant_ht")),
@@ -668,19 +921,37 @@ def render_summary_table(
             detail = f"{odoo_global} HT:{ht_check} TVA:{tva_check} TTC:{ttc_check}"
             rows[-1].append(detail)
 
+    # Colonnes à aligner à droite (index basé sur headers)
+    # HT=5, TVA=6, TTC=7, Durée=8
+    right_align_indices = set()
+    for idx, h in enumerate(headers):
+        if h in {"HT", "TVA", "TTC", "Durée (s)"}:
+            right_align_indices.add(idx)
+
     widths = [visual_width(header) for header in headers]
     for row in rows:
         for idx, value in enumerate(row):
             widths[idx] = max(widths[idx], visual_width(value))
 
-    def format_row(values: List[str]) -> str:
-        padded_values = [pad_cell(value, widths[idx]) for idx, value in enumerate(values)]
+    def format_row(values: List[str], is_header: bool = False) -> str:
+        padded_values = [
+            pad_cell(value, widths[idx], align_right=(not is_header and idx in right_align_indices))
+            for idx, value in enumerate(values)
+        ]
         return " | ".join(padded_values)
 
     separator = "-+-".join("-" * width for width in widths)
 
-    print("\nTableau de synthèse:", file=sys.stderr)
-    print(format_row(headers), file=sys.stderr)
+    # Titre avec provider et modèle
+    if LLM_PROVIDER == "gemini":
+        model_display = GEMINI_MODEL
+    elif LLM_PROVIDER == "deepinfra":
+        from config import DEEPINFRA_MODEL
+        model_display = DEEPINFRA_MODEL
+    else:
+        model_display = MODEL_NAME
+    print(f"\nTableau de synthèse avec le provider {LLM_PROVIDER.upper()} et le modèle {model_display} :", file=sys.stderr)
+    print(format_row(headers, is_header=True), file=sys.stderr)
     print(separator, file=sys.stderr)
     for row in rows:
         print(format_row(row), file=sys.stderr)
@@ -744,6 +1015,16 @@ def run(
 
     invoices_dir = Path(factures_dir or FACTURES_DIR).expanduser().resolve()
 
+    provider_info = f"Provider LLM : {LLM_PROVIDER.upper()}"
+    if LLM_PROVIDER == "gemini":
+        provider_info += f" (modèle : {GEMINI_MODEL})"
+    elif LLM_PROVIDER == "deepinfra":
+        from config import DEEPINFRA_MODEL
+        provider_info += f" (modèle : {DEEPINFRA_MODEL})"
+    else:
+        provider_info += f" (modèle : {MODEL_NAME})"
+    print(provider_info, file=sys.stderr)
+
     try:
         pdf_files = list_pdf_files(invoices_dir)
     except FileNotFoundError as err:
@@ -781,7 +1062,7 @@ def run(
         use_vision = not _text_is_usable(pdf_text)
 
         if use_vision:
-            print(f"  🖼 Mode vision activé (texte insuffisant)", file=sys.stderr)
+            print(f"  Mode vision activé (texte insuffisant)", file=sys.stderr)
             images_b64 = pdf_to_base64_images(pdf_path)
             prompt = build_prompt_fn("")  # prompt sans texte PDF
             api_response = call_vllm_vision(prompt, images_b64, temperature=TEMPERATURE)
@@ -857,7 +1138,7 @@ def run(
 
         if (not entity_found or entity_suspect) and not use_vision:
             print(
-                f"  🖼 Tentative vision ciblée pour {entity_label.lower()} de {pdf_path.name}…",
+                f"  Tentative vision ciblée pour {entity_label.lower()} de {pdf_path.name}…",
                 file=sys.stderr,
             )
             vision_details = _ask_entity_vision(
@@ -868,7 +1149,7 @@ def run(
             if vision_entity:
                 parsed_json[entity_key] = vision_entity
                 print(
-                    f"  ✅ {entity_label} trouvé via vision : {vision_entity}",
+                    f"  -> {entity_label} trouvé via vision : {vision_entity}",
                     file=sys.stderr,
                 )
                 # L'identifiant précédent appartenait à l'entité exclue :
@@ -877,7 +1158,7 @@ def run(
                 parsed_json[entity_id_key] = vision_id
                 if vision_id:
                     print(
-                        f"  ✅ Identifiant {entity_label.lower()} trouvé via vision : {vision_id}",
+                        f"  -> Identifiant {entity_label.lower()} trouvé via vision : {vision_id}",
                         file=sys.stderr,
                     )
                 else:

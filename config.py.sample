@@ -8,14 +8,47 @@ FACTURES_DIR = Path(__file__).parent / "factures"
 # Dossier contenant les factures fournisseurs PDF à analyser.
 FACTURES_FOURNISSEUR_DIR = Path(__file__).parent / "factures-owork"
 
+# ---------------------------------------------------------------------------
+# Choix du fournisseur LLM : "vllm", "gemini" ou "deepinfra"
+# ---------------------------------------------------------------------------
+LLM_PROVIDER = "vllm"  # "vllm" pour le serveur local, "gemini" pour Google Gemini, "deepinfra" pour DeepInfra
+
+# ---------------------------------------------------------------------------
+# Configuration vLLM
+# ---------------------------------------------------------------------------
+
 # URL de l'endpoint compatible OpenAI exposé par le serveur vLLM.
 BASE_URL = "http://192.168.0.1:8000/v1"
 
 # Nom du modèle servi par vLLM.
 MODEL_NAME = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 
-# Clé API si une authentification est nécessaire (None sinon).
+# Clé API vLLM si une authentification est nécessaire (None sinon).
 API_KEY = None
+
+# ---------------------------------------------------------------------------
+# Configuration Google Gemini
+# ---------------------------------------------------------------------------
+
+# Clé API Google Gemini (obligatoire si LLM_PROVIDER = "gemini").
+GEMINI_API_KEY = "VOTRE_CLE_API_GEMINI"
+
+# Modèle Gemini à utiliser.
+GEMINI_MODEL = "gemini-2.5-flash"
+
+# ---------------------------------------------------------------------------
+# Configuration DeepInfra
+# ---------------------------------------------------------------------------
+
+# Clé API DeepInfra (obligatoire si LLM_PROVIDER = "deepinfra").
+DEEPINFRA_API_KEY = "VOTRE_CLE_API_DEEPINFRA"
+
+# Modèle DeepInfra à utiliser (compatible OpenAI).
+DEEPINFRA_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+
+# ---------------------------------------------------------------------------
+# Paramètres communs
+# ---------------------------------------------------------------------------
 
 # Température d'échantillonnage transmise au modèle.
 TEMPERATURE = 0.0

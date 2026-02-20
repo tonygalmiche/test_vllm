@@ -13,10 +13,43 @@ pip install -r requirements.txt
 ## Configuration
 
 Modifiez [config.py](config.py) pour définir :
-- `FACTURES_DIR` : dossier contenant les PDF à analyser
+
+### Choix du fournisseur LLM
+
+- `LLM_PROVIDER` : `"vllm"` (défaut) pour utiliser le serveur vLLM local, ou `"gemini"` pour utiliser Google Gemini
+
+### Configuration vLLM
+
 - `BASE_URL` : URL du serveur vLLM (ex. `http://localhost:8000/v1`)
 - `MODEL_NAME` : nom du modèle exposé
 - `API_KEY` : clé si nécessaire (ou `None` sinon)
+
+### Configuration Google Gemini
+
+- `GEMINI_API_KEY` : clé API Google Gemini (obligatoire si `LLM_PROVIDER = "gemini"`)
+- `GEMINI_MODEL` : modèle Gemini à utiliser (défaut : `gemini-2.5-flash`)
+
+Pour obtenir une clé API Gemini :
+
+1. Rendez-vous sur **https://aistudio.google.com/apikey**
+2. Connectez-vous avec votre compte Google
+3. Cliquez sur **"Create API Key"**
+4. Choisissez un projet Google Cloud existant ou laissez-en créer un nouveau
+5. Copiez la clé générée (commence par `AIza...`)
+
+
+### Limite de la version Gratuite de Gemini au 20/02/2026
+
+Côté API, plusieurs retours indiquent qu’historiquement 2.5 Flash tournait autour de 250 requêtes/jour pour le palier gratuit, mais qu’en 2025–2026 beaucoup de comptes sont tombés à environ 20 requêtes/jour, sans plafond explicite par heure (on parle plutôt de « RPD » = requêtes par jour et éventuellement de limites par minute comme 10 RPM).
+
+Comme ces limites sont à la fois floues, par produit, et régulièrement ajustées, le plus fiable pour ton cas d’usage précis (appli Gemini, web, API, etc.) reste de vérifier directement la page d’aide de ton compte Gemini ou la console de quotas associée, qui indiquent les chiffres effectifs appliqués à ton compte à un instant T.
+
+
+
+
+### Paramètres communs
+
+- `FACTURES_DIR` : dossier contenant les PDF à analyser
 - `TEMPERATURE` : valeur de température transmise au modèle
 - `CLIENT_HINTS` : liste indicative des clients attendus (sert de contexte dans le prompt et pour un rattrapage automatique si le modèle ne renvoie pas de nom)
 
