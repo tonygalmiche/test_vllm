@@ -20,6 +20,7 @@ config.py
 # Dossiers de factures
 factures/
 factures-owork/
+fiches-techniques/
 TRI-PHOTOS/
 
 # Fichiers divers
