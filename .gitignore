@@ -14,8 +14,12 @@ build/
 venv/
 ENV/
 
-# Configuration (contient des mots de passe)
-config.py
+# Configuration (contient des mots de passe) — ignoré dans tous les sous-dossiers
+**/config.py
+
+# Données et rapports générés — ignorés dans tous les sous-dossiers
+**/data.csv
+**/rapport.html
 
 # Dossiers de factures
 factures/

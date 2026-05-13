@@ -5,3 +5,8 @@ Pillow
 wyoming
 python-pptx
 odfpy
+pandas
+matplotlib
+scipy
+plotly
+psycopg2-binary
